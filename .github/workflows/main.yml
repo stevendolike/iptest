@@ -1,10 +1,17 @@
 name: Build All Platforms
 on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag (格式 v1.0.0)"
+        required: true
+        default: "v1.0.0"
   push:
     tags:
-      - 'v*'
+      - "v*"
 permissions:
-  contents: write # access to check out code and install dependencies
+  contents: write
+  actions: read
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -86,45 +93,82 @@ jobs:
           - goos: windows
             goarch: arm64
             ext: ".exe"
+    outputs: # 添加作业输出
+      build_time: ${{ steps.set-build-time.outputs.BUILD_TIME }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 获取完整提交历史
 
       - name: Setup Go
         uses: actions/setup-go@v4
         with:
-          go-version: '1.20'  # 根据你的需求设置Go版本
+          go-version: "1.20" # 根据你的需求设置Go版本
           cache: false
 
-      - name: Build binary
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
-          EXT: ${{ matrix.ext || '' }}
-        run: |
-          # 生成输出文件名，例如 iptest-linux-amd64.exe（Windows平台加 .exe，其它无扩展名）
-          OUTPUT="iptest-${GOOS}-${GOARCH}${EXT}"
-          echo "Building $OUTPUT from iptest.go..."
-          go build -o ${OUTPUT} iptest.go
+      - name: Create Release Assets Directory
+        run: mkdir -p "${{ github.workspace }}/release_assets"
 
-      - name: Upload artifact
+      - name: Set Build Time
+        id: set-build-time # 给步骤设置ID
+        run: |
+          build_time=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
+          echo "BUILD_TIME=$build_time" >> $GITHUB_OUTPUT
+
+      - name: Build
+        run: |
+          echo "Building iptest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }} from iptest.go..."
+          GOARCH=${{ matrix.goarch }} GOOS=${{ matrix.goos }}  go build -o ${{ github.workspace }}/release_assets/iptest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }} iptest.go
+
+      - name: Generate SHA256
+        run: |
+          cd "${{ github.workspace }}/release_assets"
+          for file in $(find . -type f ! -name '*.sha256'); do
+            sha256sum "$file" | awk '{print $1}' > "${file}.sha256"
+          done
+          echo "SHA256 files generated:"
+          ls -1 *.sha256
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: iptest-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: ./iptest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}
+          name: iptest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}
+          path: ${{ github.workspace }}/release_assets/*
+
   release:
-    name: Create Release
+    name: Release
     needs: build
-    # 仅在推送到 main 分支时触发 Release 创建
-    # if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - name: Download all artifacts
+      - name: Checkout code
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Upload GitHub Release
+
+      - name: Move Release Assets
+        run: |
+          mkdir -p release_assets
+          find artifacts -type f ! -name "*.txt" -exec mv {} release_assets/ \;
+          echo "Files to release:"
+          ls -lh release_assets/
+
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          files: artifacts/*
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          name: "Release ${{ github.event.inputs.release_tag || github.ref_name }}"
+          body: |
+            ## 多平台构建版本
+            **构建时间:** ${{ needs.build.outputs.build_time }}
+
+            完整变更日志:  
+            https://github.com/Kwisma/iptest/commits/${{ github.event.inputs.release_tag || github.ref_name }}
+          files: |
+            ${{ github.workspace }}/release_assets/*
+          draft: false
+          prerelease: ${{ contains(github.event.inputs.release_tag, '-rc') || contains(github.ref_name, '-rc') }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

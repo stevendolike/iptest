@@ -214,8 +214,7 @@ func main() {
 			if *delay > 0 && tcpDuration.Milliseconds() > int64(*delay) {
 			    return // 超过延迟阈值直接返回（仅在delay>0时生效）
 			}
- 			// 记录通过延迟检查的有效IP
- 			atomic.AddInt32(&validCount, 1)
+ 			
 			start = time.Now()
 
 			client := http.Client{
@@ -256,9 +255,11 @@ func main() {
 			timeout := time.After(maxDuration)
 			// 使用一个 goroutine 来读取响应体
 			done := make(chan bool)
+			errChan := make(chan error)
 			go func() {
 				_, err := io.Copy(buf, resp.Body)
 				done <- true
+				errChan <- err
 				if err != nil {
 					return
 				}
@@ -273,6 +274,7 @@ func main() {
 			}
 
 			body := buf
+			err = <-errChan
 			if err != nil {
 				return
 			}
@@ -281,6 +283,8 @@ func main() {
 					dataCenter := matches[1]
 					locCode := matches[2]
 					loc, ok := locationMap[dataCenter]
+					// 记录通过延迟检查的有效IP
+					atomic.AddInt32(&validCount, 1)
 					if ok {
 						fmt.Printf("发现有效IP %s 端口 %d 位置信息 %s 延迟 %d 毫秒\n", ipAddr, port, loc.City_zh, tcpDuration.Milliseconds())
 						resultChan <- result{ipAddr, port, dataCenter, locCode, loc.Region, loc.City, loc.Region_zh, loc.Country, loc.City_zh, loc.Emoji, fmt.Sprintf("%d ms", tcpDuration.Milliseconds()), tcpDuration}
