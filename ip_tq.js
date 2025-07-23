@@ -42,6 +42,7 @@ async function processCSVFiles() {
     console.error("处理文件时发生错误:", error.message);
   }
 }
+
 async function extractIpAndPort(csvFilePath, txtFilePath) {
   try {
     // 读取 CSV 文件内容
@@ -76,6 +77,10 @@ async function extractIpAndPort(csvFilePath, txtFilePath) {
     const jsonFilePath = path.resolve(__dirname, "locations.json");
     const jsonData = await fs.promises.readFile(jsonFilePath, "utf8");
     const locations = JSON.parse(jsonData);
+    
+    // 判断是否为IPv6地址
+    const isIPv6 = (ip) => ip.includes(":");
+    
     const ipEntries = lines
       .slice(1) // 去掉表头
       .map((line) => line.split(",")) // 按逗号分割每一行
@@ -95,13 +100,19 @@ async function extractIpAndPort(csvFilePath, txtFilePath) {
         return true;
       })
       .map((fields) => {
-        const ip = fields[ipIndex];
+        let ip = fields[ipIndex];
         const port = fields[portIndex];
         const dc = fields[datacenterIndex];
         const location = locations.find((loc) => loc.iata === dc);
         const country = location
           ? location.emoji + location.country
           : "Unknown";
+        
+        // 如果是IPv6地址且没有括号，则添加括号
+        if (isIPv6(ip) && !ip.startsWith("[")) {
+          ip = `[${ip}]`;
+        }
+        
         console.log(`提取：${ip}:${port}#${country}`);
         return { entry: `${ip}:${port}#${country}`, country };
       });
