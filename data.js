@@ -313,6 +313,9 @@ const CONFIG = {
     "Ho Chi Minh City": "胡志明市",
     Lusaka: "卢萨卡",
     Harare: "哈拉雷",
+    "Addis Ababa": "亚的斯亚贝巴",
+    "San Pedro Sula": "圣佩德罗苏拉",
+    Bishkek: "比什凯克"
   },
   DATA_SOURCES: [
     {
