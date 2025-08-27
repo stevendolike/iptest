@@ -1,12 +1,13 @@
 # Cloudflare IP 测试工具
 
-一个用于测试 Cloudflare IP 地址延迟和下载速度的 Go 语言工具。支持并发检测、延迟过滤、下载测速，并将结果导出为 CSV 文件。
+一个用于测试 Cloudflare IP 地址延迟和下载速度的 Go 语言工具。支持并发检测、延迟过滤、国家过滤、下载速度过滤，并将结果导出为 CSV 文件。
 
 ## 功能特性
 
 - **并发测试**：支持自定义最大并发线程数。
 - **延迟检测**：可设置延迟阈值过滤高延迟 IP。
-- **下载测速**：支持多线程下载速度测试。
+- **国家过滤**：可指定国家列表，仅测试和记录特定国家的 IP。
+- **下载测速**：支持多线程下载速度测试，可设置速度阈值过滤低速 IP。
 - **地理位置信息**：自动获取数据中心和地理位置信息（支持中英文）。
 - **结果导出**：生成 CSV 文件，包含 IP、端口、延迟、下载速度等详细信息。
 - **TLS 支持**：可切换 HTTP/HTTPS 协议进行测试。
@@ -24,7 +25,7 @@ git clone https://github.com/Kwisma/iptest.git
 cd iptest
 ```
 
-2.编译程序
+2. 编译程序
 
 ```bash
 go build -o iptest iptest.go
@@ -44,32 +45,34 @@ go build -o iptest iptest.go
 
 |参数|默认值|说明|
 |------|------|------|
-|`-file`|`ip.txt`|IP 地址文件路径，格式为每行 `IP 端口`（例如 `1.1.1.1` `443`）。|
+|`-file`|`ip.txt`|IP 地址文件路径，格式为每行 `IP 端口`（例如 `1.1.1.1 443`）。|
 |`-outfile`|`ip.csv`|输出 CSV 文件路径。|
 |`-max`|`100`|最大并发协程数。|
 |`-speedtest`|`5`|下载测速协程数量，设为 `0` 禁用测速。|
 |`-url`|`speed.cloudflare.com/__down?bytes=500000000`|测速文件地址（默认为 Cloudflare 大文件）。|
 |`-tls`|`true`|是否启用 TLS（`true` 为 HTTPS，`false` 为 HTTP）。|
 |`-delay`|`0`|延迟阈值（毫秒），超过此值的 IP 将被过滤（设为 `0` 禁用过滤）。|
+|`-countries`|``|国家过滤列表（逗号分隔，例如：`CN,US,JP`），默认空（不过滤）。|
+|`-speedLimit`|`0`|下载速度阈值（kB/s），低于此值的 IP 将被过滤（设为 `0` 禁用过滤）。|
 
 ### 示例
 
-1.基础测试（仅延迟）：
+1. 基础测试（仅延迟）：
 
 ```bash
 ./iptest -file=ip.txt -outfile=fast-ips.csv -max=200 -speedtest=0
 ```
 
-2.启用下载测速：
+2. 启用下载测速并过滤国家：
 
 ```bash
-./iptest -file=ip.txt -outfile=result.csv -speedtest=10 -tls=true
+./iptest -file=ip.txt -outfile=result.csv -speedtest=10 -tls=true -countries=CN,US
 ```
 
-3.过滤高延迟 IP：
+3. 过滤高延迟和低速 IP：
 
 ```bash
-./iptest -delay=150  # 仅保留延迟 ≤150ms 的 IP
+./iptest -file=ip.txt -outfile=result.csv -delay=150 -speedLimit=1000
 ```
 
 ## 输入文件格式
@@ -89,13 +92,12 @@ CSV 文件包含以下字段：
 
 ## 注意事项
 
-1.**文件权限**：首次运行会自动下载 `locations.json`，请确保有写入权限。
-
-2.**网络连接**：需能访问 `https://locations-adw.pages.dev/` 以下载地理位置数据。
-
-3.**Linux 系统**：可能需要 `sudo` 权限提升文件描述符上限。
-
-4.**测速文件**：默认使用 Cloudflare 的 500MB 文件，确保测试 IP 允许大流量下载。
+1. **文件权限**：首次运行会自动下载 `locations.json`，请确保有写入权限。
+2. **网络连接**：需能访问 `https://locations-adw.pages.dev/` 以下载地理位置数据。
+3. **Linux 系统**：可能需要 `sudo` 权限提升文件描述符上限。
+4. **测速文件**：默认使用 Cloudflare 的 500MB 文件，确保测试 IP 允许大流量下载。
+5. **国家过滤**：输入的国家代码需与 `locations.json` 中的 `cca2` 字段一致（如 `CN`、`US`）。
+6. **速度过滤**：仅在启用测速（`-speedtest > 0`）时生效，低于 `-speedLimit` 的 IP 不会记录到输出文件中。
 
 ## 许可证
 
@@ -145,9 +147,11 @@ node ip_init.js
 - `speedtest` 默认并发 `5` 下载测速协程数量,设为0禁用测速
 - `url` 默认测速地址 `speed.cloudflare.com/__down?bytes=500000000` 测速文件地址
 - `tls` 默认参数 `true` 是否启用TLS
+- `countries` 默认空，国家过滤列表（逗号分隔，例如：`CN,US,JP`），不过滤时不设置
+- `speedLimit` 默认 `0`，下载速度阈值（kB/s），低于此值的 IP 将被过滤（设为 `0` 禁用过滤）
 
 ```bash
-go run iptest.go -file ip_tq.txt -outfile ip_tq.csv
+go run iptest.go -file ip_tq.txt -outfile ip_tq.csv -countries=CN,US -speedLimit=1000
 ```
 
 提取有速度的ip并整理为指定格式
