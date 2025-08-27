@@ -108,7 +108,7 @@ func main() {
 	var locations []location
 	if _, err := os.Stat("locations.json"); os.IsNotExist(err) {
 		fmt.Println("本地 locations.json 不存在\n正在从 https://locations-adw.pages.dev/ 下载 locations.json")
-		resp, err := http.Get("https://locations-adw.pages.dev/")
+		resp, err := http.Get("https://proxy.api.030101.xyz/locations-adw.pages.dev/")
 		if err != nil {
 			fmt.Printf("无法从URL中获取JSON: %v\n", err)
 			return
