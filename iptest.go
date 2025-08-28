@@ -38,7 +38,8 @@ var (
 	enableTLS    = flag.Bool("tls", true, "是否启用TLS")                                           // TLS是否启用
 	delay        = flag.Int("delay", 0, "延迟阈值(ms)，默认为0禁用延迟过滤")                           // 默认0，禁用过滤
 	countries    = flag.String("countries", "", "国家过滤列表（逗号分隔，例如：CN,US,JP），默认空（不过滤）") // 国家过滤参数
-	speedLimit   = flag.Int("speedLimit", 0, "下载速度阈值(kB/s)，默认为0（不过滤）")                        // 新增速度阈值参数
+	speedLimit   = flag.Int("speedLimit", 0, "下载速度阈值(kB/s)，默认为0（不过滤）")                        // 速度阈值参数
+	fast         = flag.Bool("fast", false, "启用快速模式，测速时若前5秒速度未超过100kB/s则终止")                  // 新增快速模式参数
 )
 
 type result struct {
@@ -107,7 +108,7 @@ func main() {
 
 	var locations []location
 	if _, err := os.Stat("locations.json"); os.IsNotExist(err) {
-		fmt.Println("本地 locations.json 不存在\n正在从 https://locations-adw.pages.dev/ 下载 locations.json")
+		fmt.Println("本地 locations.json 不存在\n正在从 https://proxy.api.030101.xyz/locations-adw.pages.dev/ 下载 locations.json")
 		resp, err := http.Get("https://proxy.api.030101.xyz/locations-adw.pages.dev/")
 		if err != nil {
 			fmt.Printf("无法从URL中获取JSON: %v\n", err)
@@ -376,15 +377,15 @@ func main() {
 
 	writer := csv.NewWriter(file)
 	if *speedTest > 0 {
-		writer.Write([]string{"IP地址", "端口", "TLS", "数据中心", "源IP位置", "地区", "城市", "地区(中文)", "国家", "城市(中文)", "国旗", "网络延迟", "下载速度"})
+		writer.Write([]string{"IP地址", "端口", "TLS", "数据中心", "源IP位置", "地区", "城市", "网络延迟", "下载速度"})
 	} else {
-		writer.Write([]string{"IP地址", "端口", "TLS", "数据中心", "源IP位置", "地区", "城市", "地区(中文)", "国家", "城市(中文)", "国旗", "网络延迟"})
+		writer.Write([]string{"IP地址", "端口", "TLS", "数据中心", "源IP位置", "地区", "城市", "网络延迟"})
 	}
 	for _, res := range results {
 		if *speedTest > 0 {
-			writer.Write([]string{res.result.ip, strconv.Itoa(res.result.port), strconv.FormatBool(*enableTLS), res.result.dataCenter, res.result.locCode, res.result.region, res.result.city, res.result.region_zh, res.result.country, res.result.city_zh, res.result.emoji, res.result.latency, fmt.Sprintf("%.0f kB/s", res.downloadSpeed)})
+			writer.Write([]string{res.result.ip, strconv.Itoa(res.result.port), strconv.FormatBool(*enableTLS), res.result.dataCenter, res.result.locCode, res.result.region, res.result.city, res.result.latency, fmt.Sprintf("%.0f kB/s", res.downloadSpeed)})
 		} else {
-			writer.Write([]string{res.result.ip, strconv.Itoa(res.result.port), strconv.FormatBool(*enableTLS), res.result.dataCenter, res.result.locCode, res.result.region, res.result.city, res.result.region_zh, res.result.country, res.result.city_zh, res.result.emoji, res.result.latency})
+			writer.Write([]string{res.result.ip, strconv.Itoa(res.result.port), strconv.FormatBool(*enableTLS), res.result.dataCenter, res.result.locCode, res.result.region, res.result.city, res.result.latency})
 		}
 	}
 
@@ -458,6 +459,7 @@ func getDownloadSpeed(ip string, port int) float64 {
 
 	fmt.Printf("正在测试IP %s 端口 %d\n", ip, port)
 	startTime := time.Now()
+
 	client := http.Client{
 		Transport: &http.Transport{
 			Dial: func(network, addr string) (net.Conn, error) {
@@ -474,9 +476,63 @@ func getDownloadSpeed(ip string, port int) float64 {
 	}
 	defer resp.Body.Close()
 
-	written, _ := io.Copy(io.Discard, resp.Body)
-	duration := time.Since(startTime)
-	speed := float64(written) / duration.Seconds() / 1024
+	// 快速模式：前5秒速度检查
+	var written int64
+	var speed float64
+	if *fast {
+		// 使用带超时的读取
+		timeout := time.After(5 * time.Second)
+		done := make(chan bool)
+		var readErr error
+		go func() {
+			var totalWritten int64
+			buf := make([]byte, 1024*1024) // 1MB 缓冲区
+			for {
+				n, err := resp.Body.Read(buf)
+				totalWritten += int64(n)
+				if err != nil && err != io.EOF {
+					readErr = err
+					break
+				}
+				if err == io.EOF {
+					break
+				}
+				// 检查是否已到5秒
+				if time.Since(startTime) >= 5*time.Second {
+					break
+				}
+			}
+			written = totalWritten
+			duration := time.Since(startTime)
+			speed = float64(written) / duration.Seconds() / 1024
+			done <- true
+		}()
+
+		select {
+		case <-done:
+			if readErr != nil {
+				fmt.Printf("IP %s 端口 %d 测速失败: %v\n", ip, port, readErr)
+				return 0
+			}
+			// 检查前5秒速度
+			if speed < 100 {
+				fmt.Printf("IP %s 端口 %d 前5秒速度 %.0f kB/s 未达100 kB/s，终止测速\n", ip, port, speed)
+				return speed
+			}
+			// 继续读取剩余数据
+			written, _ = io.Copy(io.Discard, resp.Body)
+			duration := time.Since(startTime)
+			speed = float64(written) / duration.Seconds() / 1024
+		case <-timeout:
+			fmt.Printf("IP %s 端口 %d 前5秒速度 %.0f kB/s 未达100 kB/s，终止测速\n", ip, port, speed)
+			return speed
+		}
+	} else {
+		// 正常模式
+		written, _ = io.Copy(io.Discard, resp.Body)
+		duration := time.Since(startTime)
+		speed = float64(written) / duration.Seconds() / 1024
+	}
 
 	fmt.Printf("IP %s 端口 %d 下载速度 %.0f kB/s\n", ip, port, speed)
 	return speed
