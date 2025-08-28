@@ -375,21 +375,32 @@ func main() {
 	}
 	defer file.Close()
 
+	// 添加 UTF-8 BOM 头
+	_, err = file.Write([]byte{0xEF, 0xBB, 0xBF})
+	if err != nil {
+		fmt.Printf("写入 UTF-8 BOM 失败: %v\n", err)
+		return
+	}
+
 	writer := csv.NewWriter(file)
 	if *speedTest > 0 {
-		writer.Write([]string{"IP地址", "端口", "TLS", "数据中心", "源IP位置", "地区", "城市", "网络延迟", "下载速度"})
+		writer.Write([]string{"IP地址", "端口", "TLS", "数据中心", "源IP位置", "地区", "城市", "地区(中文)", "国家", "城市(中文)", "国旗", "网络延迟", "下载速度"})
 	} else {
-		writer.Write([]string{"IP地址", "端口", "TLS", "数据中心", "源IP位置", "地区", "城市", "网络延迟"})
+		writer.Write([]string{"IP地址", "端口", "TLS", "数据中心", "源IP位置", "地区", "城市", "地区(中文)", "国家", "城市(中文)", "国旗", "网络延迟"})
 	}
 	for _, res := range results {
 		if *speedTest > 0 {
-			writer.Write([]string{res.result.ip, strconv.Itoa(res.result.port), strconv.FormatBool(*enableTLS), res.result.dataCenter, res.result.locCode, res.result.region, res.result.city, res.result.latency, fmt.Sprintf("%.0f kB/s", res.downloadSpeed)})
+			writer.Write([]string{res.result.ip, strconv.Itoa(res.result.port), strconv.FormatBool(*enableTLS), res.result.dataCenter, res.result.locCode, res.result.region, res.result.city, res.result.region_zh, res.result.country, res.result.city_zh, res.result.emoji, res.result.latency, fmt.Sprintf("%.0f kB/s", res.downloadSpeed)})
 		} else {
-			writer.Write([]string{res.result.ip, strconv.Itoa(res.result.port), strconv.FormatBool(*enableTLS), res.result.dataCenter, res.result.locCode, res.result.region, res.result.city, res.result.latency})
+			writer.Write([]string{res.result.ip, strconv.Itoa(res.result.port), strconv.FormatBool(*enableTLS), res.result.dataCenter, res.result.locCode, res.result.region, res.result.city, res.result.region_zh, res.result.country, res.result.city_zh, res.result.emoji, res.result.latency})
 		}
 	}
 
 	writer.Flush()
+	if err := writer.Error(); err != nil {
+		fmt.Printf("写入 CSV 失败: %v\n", err)
+		return
+	}
 	fmt.Print("\033[2J")
 	fmt.Printf("有效IP数量: %d | 成功将结果写入文件 %s，耗时 %d秒\n", len(results), *outFile, time.Since(startTime)/time.Second)
 }
