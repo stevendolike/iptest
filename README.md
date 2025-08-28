@@ -130,6 +130,8 @@ CSV 文件使用 UTF-8-BOM 编码，包含以下字段：
 
 `delay` 添加参考: [https://github.com/yutian81/IP-SpeedTest](https://github.com/yutian81/IP-SpeedTest)
 
+特别感谢 Mingyu 提供的代理服务：[https://proxy.api.030101.xyz/](https://proxy.api.030101.xyz/)
+
 ## 批量获取ip
 
 更换初始数据即可开始
