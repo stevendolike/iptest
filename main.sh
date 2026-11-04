@@ -26,6 +26,12 @@ run_step() {
 value_flag=''
 for arg in "$@"; do
     if [ -n "$value_flag" ]; then
+        case "$arg" in
+            -*)
+                log ERROR "测试参数缺少值: $value_flag (下一项为选项: $arg)"
+                exit 1
+                ;;
+        esac
         value_flag=''
         continue
     fi
@@ -34,10 +40,10 @@ for arg in "$@"; do
             log ERROR "批量管线不允许覆盖 -file / -outfile"
             exit 1
             ;;
-        -max|--max|-speedtest|--speedtest|-url|--url|-delay|--delay|-countries|--countries|-speedLimit|--speedLimit)
+        -max|--max|-speedtest|--speedtest|-url|--url|-delay|--delay|-countries|--countries|-speedLimit|--speedLimit|-ipapi-url|--ipapi-url|-asn-db|--asn-db|-country-db|--country-db|-asn-url|--asn-url|-country-url|--country-url)
             value_flag=$arg
             ;;
-        -max=*|--max=*|-speedtest=*|--speedtest=*|-url=*|--url=*|-delay=*|--delay=*|-countries=*|--countries=*|-speedLimit=*|--speedLimit=*|-tls|--tls|-tls=*|--tls=*|-fast|--fast|-fast=*|--fast=*)
+        -max=*|--max=*|-speedtest=*|--speedtest=*|-url=*|--url=*|-delay=*|--delay=*|-countries=*|--countries=*|-speedLimit=*|--speedLimit=*|-tls|--tls|-tls=*|--tls=*|-fast|--fast|-fast=*|--fast=*|-ips|--ips|-ips=*|--ips=*|-download-db|--download-db|-download-db=*|--download-db=*|-ipapi-url=*|--ipapi-url=*|-asn-db=*|--asn-db=*|-country-db=*|--country-db=*|-asn-url=*|--asn-url=*|-country-url=*|--country-url=*)
             ;;
         -*)
             log ERROR "不支持的测试参数或位置参数标记: $arg"

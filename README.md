@@ -4,6 +4,12 @@
 
 ## 更新事项
 
+### 上游整合与自有功能
+
+整合 `Kwisma/iptest@86b24ecfcb2e01e96a9692b69d2dbdbffda0fc11` 的出站信息、ASN／国家数据库、IPS 检测、出站类型过滤及 all／top5 输出。保留本仓库的国家／速度过滤、快速模式、中文地理字段、UTF-8 BOM、完整 `ip_tq.txt` 管线及已有正确性／发布修正。这是一次性整合，不新增 cron 或自动同步 workflow。
+
+新增元数据查询默认关闭：`-ips` 明确启用 API 查询，`-download-db` 明确允许下载缺失数据库。可指定自己的代理／镜像；原有 `locations.json` 获取逻辑不变。
+
 ### 正确性与管线修正
 
 - 同步并发结果及进度，避免漏写 IP。
@@ -48,8 +54,11 @@ cd iptest
 普通编译需要 Go；批量脚本还需要 Node.js。CI 使用 Go 1.20.14 和 Node.js 24。发布构建固定 Go 1.20.14，以保留现有 35 个平台组合（包括旧版 Windows ARM）。
 
 ```bash
+go mod download
 go build -o iptest iptest.go
 ```
+
+请保留并使用仓库的 `go.mod`／`go.sum`；带 ASN／国家查询的版本不再是仅依赖标准库的单文件程序。35 个组合表示编译覆盖，不代表已在每个平台完成运行测试。
 
 ## 使用方法
 
@@ -75,6 +84,13 @@ go build -o iptest iptest.go
 |`-countries`|``|国家过滤列表（逗号分隔，例如：`CN,US,JP`），默认空（不过滤）。Windows 用户建议使用引号，如：`"CN,US"`。|
 |`-speedLimit`|`0`|下载速度阈值（kB/s），低于此值的 IP 将被过滤（设为 `0` 禁用过滤）。|
 |`-fast`|`false`|启用快速模式，测速时若前 5 秒速度未达 100 kB/s 则终止。|
+|`-ips`|`false`|按待测候选 IP 查询 IPS 类型；默认不调用该 API。|
+|`-ipapi-url`|`https://api.ipapi.is/`|IPS API 地址，可指定自家 HTTP/HTTPS 代理。|
+|`-asn-db`|`GeoLite2-ASN.mmdb`|本地 ASN 数据库；空值禁用此查询。|
+|`-country-db`|`GeoLite2-Country.mmdb`|本地出站国家数据库；空值禁用此查询。|
+|`-download-db`|`false`|明确允许下载缺失数据库；已有文件会验证，不会静默替换损坏文件。|
+|`-asn-url`|`https://jsd.onmicrosoft.cn/gh/seketiti/GeoLiet2@release/GeoLite2-ASN.mmdb`|ASN 下载地址，可指定自家镜像。|
+|`-country-url`|`https://jsd.onmicrosoft.cn/gh/seketiti/GeoLiet2@release/GeoLite2-Country.mmdb`|国家数据库下载地址，可指定自家镜像。|
 
 ### 示例
 
@@ -112,6 +128,14 @@ go build -o iptest iptest.go
 CSV 文件使用 UTF-8-BOM 编码，包含以下字段：
 
 - `IP地址`、`端口`、`TLS`、`数据中心`、`源IP位置`、`地区`、`城市`、`地区(中文)`、`国家`、`城市(中文)`、`国旗`、`网络延迟`、（若启用测速）`下载速度`。
+
+另外保留上游新增字段：`出站IP`、`出站IP类型`、`出站IP位置`、`ASN号码`、`ASN组织`、`IPS类型`、`访问协议`、`TLS版本`、`SNI`、`HTTP版本`、`WARP`、`Gateway`、`RBI`、`密钥交换`、`时间戳`。
+
+- `IP地址`／`端口` 是实际探测的候选端点；`出站IP` 来自该端点返回的 trace。
+- ASN／出站国家按 trace 的出站 IP 查询本地数据库；IPS API 则查询候选 IP。两种身份不混用，也不替换原有数据中心地理字段。
+- 缺少或无效的出站 IP 不会阻止已启用的候选 IP IPS 查询；ASN／出站国家仍保持缺失值，不改用候选 IP 冒充出站信息。
+- IPS 标签是根据 API 字段推断的提示，不是家宽属性的独立证明。明确的 `is_datacenter=true` 会阻止 ISP／ISP 被误标为家宽；API 错误、非法或空回应为 `N/A`。
+- 未取得 ASN 记录时 `ASN号码` 为 `0`，其他缺失元数据为空；不要把这些占位值当作真实查询结果。
 
 ## 注意事项
 
@@ -156,20 +180,22 @@ apt install golang-go
 npm ci --ignore-scripts
 ```
 
-先准备 `init.csv`，必须包含 `ip`、`port` 表头。支持合法 quoted CSV；重复 IP／端口组合会去重。
+先准备 `init.csv`，支持本仓库的 `ip`／`port` 或上游的 `IP地址`／`端口`（也支持 `端口号`）表头。支持合法 quoted CSV；重复 IP／端口组合会去重。
 
 ```csv
 ip,port
 1.1.1.1,443
 ```
 
-完整管线为 `init.csv → ip.txt → ip_tq.csv → ip_tq.txt`。可一次运行：
+完整管线为 `init.csv → ip.txt → ip_tq.csv → ip_tq.txt`，并额外生成 `ip_all.txt`／`ip_top5.txt`。可一次运行：
 
 ```bash
 bash main.sh -countries="CN,US" -speedLimit=1000 -fast
 ```
 
 管线允许追加表中列出的 Go 测试参数，但保留 `-file`、`-outfile`，避免后续步骤误用旧文件。`-countries CN,US` 和 `-countries=CN,US` 均支持；布尔值使用 `-tls=false` 这类等号格式。位置参数、未知参数和缺少值会在管线开始前拒绝；单独运行 Go 也不接受位置参数，但可自由指定输入／输出。
+
+值参数后紧跟另一个旗标会立即作为缺少值拒绝。若值本身以 `-` 开头（例如本地数据库文件名），请使用 `-asn-db=-cache.mmdb` 这类明确的等号格式。
 
 ## 运行
 
@@ -217,6 +243,20 @@ node ip_tq.js ip_tq.csv
 ```
 
 `ip_tq.js` 可明确指定一个或多个 Go 结果 CSV；未指定时扫描当前脚本目录的 CSV，但跳过原始 `init.csv`。缺列、无效 CSV 或任一数据记录的 IP／端口无效都会使该文件转换失败，不会覆盖上一次完整 TXT；低速过滤不绕过地址验证。有效 IPv6 输出为 `[IPv6]:端口`，端口规范化为十进制整数。
+
+结果表头兼容 `端口`／`端口号`、`源IP位置`／`IP位置`。有源国家代码时按该代码分组，缺少代码时才使用数据中心位置；未知代码不会假装成其他国家。
+
+```bash
+node ip_tq.js ip_tq.csv --outbound=ipv6
+node ip_tq.js ip_tq.csv --outbound=all --asn=64500,64501
+```
+
+- `--outbound=ipv4|ipv6|all`：按明确的出站 IP 类型过滤所有保存结果，默认 `all`。记录未提供类型时不会被当成 IPv4／IPv6。
+- `--asn=整数,整数`：只改变控制台的目标 ASN IPv4 出站列表，不额外过滤保存文件。这里的 IPv4 指出站类型，输出仍是经过验证的候选端点。上例 ASN 为文档保留编号，不是生产数据。
+- 原有 `<输入名>.txt` 保留全部符合过滤条件的记录。`ip_tq.csv` 的附加输出为 `ip_all.txt`／`ip_top5.txt`；其他文件为 `<输入名>_all.txt`／`<输入名>_top5.txt`。
+- 附加输出默认只收录至少 5 条记录的国家；all 保留该国家全部记录，top5 保留 CSV 顺序的前 5 条。可在 `ip_tq.js` 调整 `perCountryCount`；Go 开启测速时已按下载速度降序输出，否则按延迟升序输出。
+- 保留自有默认：转换器 `shu=0` 不限制完整 TXT 的每国数量，`test=0` 过滤非正速度，而不是引入上游的 100 kB/s 默认门槛。
+- 所有输出路径在转换前检查，冲突或非法选项不会开始写入。各文件独立原子替换，不是多文件事务；后续文件写入失败不会回滚已经成功替换的文件。
 
 ## 自动验证及发布
 

@@ -11,5 +11,8 @@
 /ip.csv
 /ip_tq.csv
 /ip_tq.txt
+/ip_all.txt
+/ip_top*.txt
+/GeoLite2-*.mmdb
 /proxy_ips.txt
 /reverse_ips.txt

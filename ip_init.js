@@ -8,9 +8,13 @@ import { parseIPPort } from './lib/address.js';
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 try {
-  const { rows } = await readCSV(path.join(dir, 'init.csv'), ['ip', 'port']);
+  const { headers, rows } = await readCSV(path.join(dir, 'init.csv'));
+  const ipColumn = ['ip', 'IP', 'IP地址'].find(name => headers.includes(name));
+  const portColumn = ['port', 'Port', '端口', '端口号'].find(name => headers.includes(name));
+  if (!ipColumn || !portColumn) throw new Error('CSV 文件缺少 ip／IP地址 或 port／端口号 列');
   const entries = new Set();
-  for (const { ip, port } of rows) {
+  for (const row of rows) {
+    const ip = row[ipColumn], port = row[portColumn];
     const address = parseIPPort(ip, port);
     if (!address) {
       console.error(`无效 IP 或端口: ${ip} ${port}`);

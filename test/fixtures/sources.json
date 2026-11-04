@@ -1,0 +1,16 @@
+[
+  {
+    "file": "GeoLite2-ASN-Test.mmdb",
+    "git_blob": "c50fbe9ccc1268f1a1f22a6a004bcc45cecb48ff",
+    "sha256": "891c75ef15fb9c93e06fedcbfe40e3cf4845f72dd3d38180ef979a1d3b755374",
+    "size": 12653,
+    "source": "maxmind/MaxMind-DB@0a9c1aa26cd7b91bee2efe27e7d174797d8211a6"
+  },
+  {
+    "file": "GeoLite2-Country-Test.mmdb",
+    "git_blob": "e714aac34fa15784587e1e673de385c3a0783947",
+    "sha256": "6f5e4490f425e452b6facc71ef1396f570e0a89c0088b13e29b34e80e468ee06",
+    "size": 18041,
+    "source": "maxmind/MaxMind-DB@0a9c1aa26cd7b91bee2efe27e7d174797d8211a6"
+  }
+]

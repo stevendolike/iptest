@@ -24,6 +24,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/oschwald/geoip2-golang"
 )
 
 const (
@@ -33,31 +35,53 @@ const (
 )
 
 var (
-	File         = flag.String("file", "ip.txt", "IP地址文件名称,格式为 ip port ,就是IP和端口之间用空格隔开")       // IP地址文件名称
-	outFile      = flag.String("outfile", "ip.csv", "输出文件名称")                                  // 输出文件名称
-	maxThreads   = flag.Int("max", 100, "并发请求最大协程数")                                           // 最大协程数
-	speedTest    = flag.Int("speedtest", 5, "下载测速协程数量,设为0禁用测速")                                // 下载测速协程数量
-	speedTestURL = flag.String("url", "speed.cloudflare.com/__down?bytes=500000000", "测速文件地址") // 测速文件地址
-	enableTLS    = flag.Bool("tls", true, "是否启用TLS")                                           // TLS是否启用
-	delay        = flag.Int("delay", 0, "延迟阈值(ms)，默认为0禁用延迟过滤")                                 // 默认0，禁用过滤
-	countries    = flag.String("countries", "", "国家过滤列表（逗号分隔，例如：CN,US,JP），默认空（不过滤）")           // 国家过滤参数
-	speedLimit   = flag.Int("speedLimit", 0, "下载速度阈值(kB/s)，默认为0（不过滤）")                         // 速度阈值参数
-	fast         = flag.Bool("fast", false, "启用快速模式，测速时若前5秒速度未超过100kB/s则终止")                   // 快速模式参数
+	File          = flag.String("file", "ip.txt", "IP地址文件名称,格式为 ip port ,就是IP和端口之间用空格隔开")       // IP地址文件名称
+	outFile       = flag.String("outfile", "ip.csv", "输出文件名称")                                  // 输出文件名称
+	maxThreads    = flag.Int("max", 100, "并发请求最大协程数")                                           // 最大协程数
+	speedTest     = flag.Int("speedtest", 5, "下载测速协程数量,设为0禁用测速")                                // 下载测速协程数量
+	speedTestURL  = flag.String("url", "speed.cloudflare.com/__down?bytes=500000000", "测速文件地址") // 测速文件地址
+	enableTLS     = flag.Bool("tls", true, "是否启用TLS")                                           // TLS是否启用
+	delay         = flag.Int("delay", 0, "延迟阈值(ms)，默认为0禁用延迟过滤")                                 // 默认0，禁用过滤
+	countries     = flag.String("countries", "", "国家过滤列表（逗号分隔，例如：CN,US,JP），默认空（不过滤）")           // 国家过滤参数
+	speedLimit    = flag.Int("speedLimit", 0, "下载速度阈值(kB/s)，默认为0（不过滤）")                         // 速度阈值参数
+	fast          = flag.Bool("fast", false, "启用快速模式，测速时若前5秒速度未超过100kB/s则终止")                   // 快速模式参数
+	enableIPAPI   = flag.Bool("ips", false, "启用 IPS 类型检测；按候选 IP 调用 ipapi.is，默认关闭")
+	ipAPIURL      = flag.String("ipapi-url", "https://api.ipapi.is/", "IPS API 地址，可指定自己的 HTTP/HTTPS 代理")
+	asnDBFile     = flag.String("asn-db", "GeoLite2-ASN.mmdb", "本地 ASN 数据库路径，空值禁用")
+	countryDBFile = flag.String("country-db", "GeoLite2-Country.mmdb", "本地出站国家数据库路径，空值禁用")
+	downloadDB    = flag.Bool("download-db", false, "明确允许下载缺失的 GeoLite2 数据库，默认关闭")
+	asnDBURL      = flag.String("asn-url", "https://jsd.onmicrosoft.cn/gh/seketiti/GeoLiet2@release/GeoLite2-ASN.mmdb", "ASN 数据库下载地址，可指定自家镜像")
+	countryDBURL  = flag.String("country-url", "https://jsd.onmicrosoft.cn/gh/seketiti/GeoLiet2@release/GeoLite2-Country.mmdb", "Country 数据库下载地址，可指定自家镜像")
 )
 
 type result struct {
-	ip          string        // IP地址
-	port        int           // 端口
-	dataCenter  string        // 数据中心
-	locCode     string        // 源IP位置
-	region      string        // 地区
-	city        string        // 城市
-	region_zh   string        // 地区(中文)
-	country     string        // 国家
-	city_zh     string        // 城市(中文)
-	emoji       string        // 国旗
-	latency     string        // 延迟
-	tcpDuration time.Duration // TCP请求延迟
+	ip                           string        // IP地址
+	port                         int           // 端口
+	dataCenter                   string        // 数据中心
+	locCode                      string        // 源IP位置
+	region                       string        // 地区
+	city                         string        // 城市
+	region_zh                    string        // 地区(中文)
+	country                      string        // 国家
+	city_zh                      string        // 城市(中文)
+	emoji                        string        // 国旗
+	latency                      string        // 延迟
+	tcpDuration                  time.Duration // TCP请求延迟
+	outboundIP                   string
+	ipType                       string
+	countryName                  string
+	visitScheme                  string
+	tlsVersion                   string
+	sni                          string
+	httpVersion                  string
+	warp                         string
+	gateway                      string
+	rbi                          string
+	kex                          string
+	timestamp                    string
+	autonomousSystemNumber       uint
+	autonomousSystemOrganization string
+	ipsType                      string
 }
 
 type speedtestresult struct {
@@ -105,6 +129,11 @@ func run() error {
 	if _, err := downloadURL(*speedTestURL, *enableTLS); err != nil {
 		return err
 	}
+	if *enableIPAPI {
+		if _, err := metadataURL(*ipAPIURL); err != nil {
+			return fmt.Errorf("-ipapi-url: %w", err)
+		}
+	}
 	if *countries != "" {
 		for _, code := range strings.Split(*countries, ",") {
 			if !regexp.MustCompile(`^[A-Za-z]{2}$`).MatchString(strings.TrimSpace(code)) {
@@ -141,6 +170,23 @@ func run() error {
 	ips, err := readIPs(*File)
 	if err != nil {
 		return fmt.Errorf("无法从文件中读取 IP: %w", err)
+	}
+	databases := geoDatabases{}
+	if len(ips) > 0 {
+		databases.asn, err = loadGeoDatabase(*asnDBFile, "ASN", *asnDBURL)
+		if err != nil {
+			return fmt.Errorf("ASN 数据库: %w", err)
+		}
+		if databases.asn != nil {
+			defer databases.asn.Close()
+		}
+		databases.country, err = loadGeoDatabase(*countryDBFile, "Country", *countryDBURL)
+		if err != nil {
+			return fmt.Errorf("Country 数据库: %w", err)
+		}
+		if databases.country != nil {
+			defer databases.country.Close()
+		}
 	}
 
 	var wg sync.WaitGroup
@@ -271,7 +317,7 @@ func run() error {
 						}
 						atomic.AddInt32(&validCount, 1)
 						fmt.Printf("发现有效IP %s 端口 %d 位置信息未知 延迟 %d 毫秒\n", ipAddr, port, tcpDuration.Milliseconds())
-						resultChan <- result{ipAddr, port, dataCenter, locCode, "", "", "", "", "", "", fmt.Sprintf("%d ms", tcpDuration.Milliseconds()), tcpDuration}
+						resultChan <- makeTraceResult(ipAddr, port, dataCenter, locCode, tcpDuration, location{}, body.String(), databases)
 						return
 					}
 
@@ -287,7 +333,7 @@ func run() error {
 					// 记录通过延迟检查和国家过滤的有效IP
 					atomic.AddInt32(&validCount, 1)
 					fmt.Printf("发现有效IP %s 端口 %d 位置信息 %s 国家 %s 延迟 %d 毫秒\n", ipAddr, port, loc.City_zh, loc.Cca2, tcpDuration.Milliseconds())
-					resultChan <- result{ipAddr, port, dataCenter, locCode, loc.Region, loc.City, loc.Region_zh, loc.Country, loc.City_zh, loc.Emoji, fmt.Sprintf("%d ms", tcpDuration.Milliseconds()), tcpDuration}
+					resultChan <- makeTraceResult(ipAddr, port, dataCenter, locCode, tcpDuration, loc, body.String(), databases)
 				}
 			}
 		}(ip)
@@ -376,17 +422,19 @@ func run() error {
 	}
 
 	writer := csv.NewWriter(file)
+	header := []string{"IP地址", "端口", "TLS", "数据中心", "源IP位置", "地区", "城市", "地区(中文)", "国家", "城市(中文)", "国旗", "网络延迟"}
 	if *speedTest > 0 {
-		writer.Write([]string{"IP地址", "端口", "TLS", "数据中心", "源IP位置", "地区", "城市", "地区(中文)", "国家", "城市(中文)", "国旗", "网络延迟", "下载速度"})
-	} else {
-		writer.Write([]string{"IP地址", "端口", "TLS", "数据中心", "源IP位置", "地区", "城市", "地区(中文)", "国家", "城市(中文)", "国旗", "网络延迟"})
+		header = append(header, "下载速度")
 	}
+	header = append(header, "出站IP", "出站IP类型", "出站IP位置", "IPS类型", "ASN号码", "ASN组织", "访问协议", "TLS版本", "SNI", "HTTP版本", "WARP", "Gateway", "RBI", "密钥交换", "时间戳")
+	writer.Write(header)
 	for _, res := range results {
+		row := []string{res.ip, strconv.Itoa(res.port), strconv.FormatBool(*enableTLS), res.dataCenter, res.locCode, res.region, res.city, res.region_zh, res.country, res.city_zh, res.emoji, res.latency}
 		if *speedTest > 0 {
-			writer.Write([]string{res.result.ip, strconv.Itoa(res.result.port), strconv.FormatBool(*enableTLS), res.result.dataCenter, res.result.locCode, res.result.region, res.result.city, res.result.region_zh, res.result.country, res.result.city_zh, res.result.emoji, res.result.latency, fmt.Sprintf("%.0f kB/s", res.downloadSpeed)})
-		} else {
-			writer.Write([]string{res.result.ip, strconv.Itoa(res.result.port), strconv.FormatBool(*enableTLS), res.result.dataCenter, res.result.locCode, res.result.region, res.result.city, res.result.region_zh, res.result.country, res.result.city_zh, res.result.emoji, res.result.latency})
+			row = append(row, fmt.Sprintf("%.0f kB/s", res.downloadSpeed))
 		}
+		row = append(row, res.outboundIP, res.ipType, res.countryName, res.ipsType, strconv.FormatUint(uint64(res.autonomousSystemNumber), 10), res.autonomousSystemOrganization, res.visitScheme, res.tlsVersion, res.sni, res.httpVersion, res.warp, res.gateway, res.rbi, res.kex, res.timestamp)
+		writer.Write(row)
 	}
 
 	writer.Flush()
@@ -402,6 +450,228 @@ func run() error {
 	fmt.Print("\033[2J")
 	fmt.Printf("有效IP数量: %d | 成功将结果写入文件 %s，耗时 %d秒\n", len(results), *outFile, time.Since(startTime)/time.Second)
 	return nil
+}
+
+// Keep upstream trace metadata while retaining the fork's established CSV names.
+func makeTraceResult(ip string, port int, colo, locCode string, latency time.Duration, loc location, body string, databases geoDatabases) result {
+	trace := parseTraceResponse(body)
+	res := result{
+		ip: ip, port: port, dataCenter: colo, locCode: locCode,
+		region: loc.Region, city: loc.City, region_zh: loc.Region_zh, country: loc.Country, city_zh: loc.City_zh, emoji: loc.Emoji,
+		latency: fmt.Sprintf("%d ms", latency.Milliseconds()), tcpDuration: latency,
+		outboundIP: trace["ip"], ipType: getIPType(trace["ip"]), ipsType: "N/A",
+		visitScheme: trace["visit_scheme"], tlsVersion: trace["tls"], sni: trace["sni"], httpVersion: trace["http"],
+		warp: trace["warp"], gateway: trace["gateway"], rbi: trace["rbi"], kex: trace["kex"], timestamp: trace["ts"],
+	}
+	if *enableIPAPI {
+		res.ipsType = queryIPAPI(ip)
+	}
+	if outbound := net.ParseIP(res.outboundIP); outbound != nil {
+		if databases.asn != nil {
+			if record, err := databases.asn.ASN(outbound); err == nil {
+				res.autonomousSystemNumber, res.autonomousSystemOrganization = record.AutonomousSystemNumber, record.AutonomousSystemOrganization
+			}
+		}
+		if databases.country != nil {
+			if record, err := databases.country.Country(outbound); err == nil {
+				res.countryName = record.Country.Names["zh-CN"]
+			}
+		}
+	}
+	return res
+}
+
+type geoDatabases struct{ asn, country *geoip2.Reader }
+
+// Read into immutable memory rather than depending on platform-specific mmap.
+// Missing optional caches do not trigger hidden network downloads.
+func loadGeoDatabase(name, kind, sourceURL string) (*geoip2.Reader, error) {
+	if name == "" {
+		return nil, nil
+	}
+	file, err := os.Open(name)
+	if os.IsNotExist(err) {
+		if *downloadDB {
+			return downloadGeoDatabase(name, kind, sourceURL)
+		}
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	const maxDatabase = 64 << 20
+	data, err := io.ReadAll(io.LimitReader(file, maxDatabase+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxDatabase {
+		return nil, fmt.Errorf("数据库超过 64 MiB 上限")
+	}
+	return decodeGeoDatabase(data, kind)
+}
+
+func decodeGeoDatabase(data []byte, kind string) (*geoip2.Reader, error) {
+	reader, err := geoip2.FromBytes(data)
+	if err != nil {
+		if reader != nil {
+			reader.Close()
+		}
+		return nil, err
+	}
+	if kind == "ASN" {
+		_, err = reader.ASN(net.IPv4zero)
+	} else {
+		_, err = reader.Country(net.IPv4zero)
+	}
+	if err != nil {
+		reader.Close()
+		return nil, err
+	}
+	return reader, nil
+}
+
+func downloadGeoDatabase(name, kind, rawURL string) (*geoip2.Reader, error) {
+	address, err := metadataURL(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	client := http.Client{Timeout: 15 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Get(address.String())
+	if err != nil {
+		return nil, fmt.Errorf("数据库下载请求失败")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("数据库下载 HTTP %d", resp.StatusCode)
+	}
+	const maxDatabase = 64 << 20
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxDatabase+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxDatabase {
+		return nil, fmt.Errorf("数据库超过 64 MiB 上限")
+	}
+	reader, err := decodeGeoDatabase(data, kind)
+	if err != nil {
+		return nil, err
+	}
+	published := false
+	defer func() {
+		if !published {
+			reader.Close()
+		}
+	}()
+	file, err := os.CreateTemp(filepath.Dir(name), ".geoip-*.mmdb")
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	defer os.Remove(file.Name())
+	if _, err := file.Write(data); err != nil {
+		return nil, err
+	}
+	if err := file.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Rename(file.Name(), name); err != nil {
+		return nil, err
+	}
+	published = true
+	return reader, nil
+}
+
+type ipapiResponse struct {
+	IsDatacenter bool `json:"is_datacenter"`
+	Company      struct {
+		Type string `json:"type"`
+	} `json:"company"`
+	ASN struct {
+		Type string `json:"type"`
+	} `json:"asn"`
+	Error string `json:"error"`
+}
+
+func metadataURL(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Hostname() == "" || parsed.User != nil || parsed.Fragment != "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil, fmt.Errorf("元数据 URL 必须为 HTTP/HTTPS、包含主机名且不得包含凭据或 fragment")
+	}
+	return parsed, nil
+}
+
+func queryIPAPI(ip string) string {
+	if net.ParseIP(ip) == nil {
+		return "N/A"
+	}
+	address, err := metadataURL(*ipAPIURL)
+	if err != nil {
+		return "N/A"
+	}
+	query := address.Query()
+	query.Set("q", ip)
+	address.RawQuery = query.Encode()
+	client := http.Client{Timeout: 2 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Get(address.String())
+	if err != nil {
+		return "N/A"
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "N/A"
+	}
+	const maxResponse = 1 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponse+1))
+	if err != nil || len(body) > maxResponse {
+		return "N/A"
+	}
+	var data ipapiResponse
+	if json.Unmarshal(body, &data) != nil || data.Error != "" {
+		return "N/A"
+	}
+	company, asn := strings.ToLower(strings.TrimSpace(data.Company.Type)), strings.ToLower(strings.TrimSpace(data.ASN.Type))
+	switch {
+	case company == "education" || asn == "education":
+		return "🎓教育网"
+	case company == "government" || asn == "government":
+		return "🏛政府"
+	case company == "banking" || asn == "banking":
+		return "💰金融"
+	case company == "business" || asn == "business":
+		return "🏢企业"
+	case company == "isp" && asn == "isp" && !data.IsDatacenter:
+		return "✅家宽"
+	case company != "" || asn != "" || data.IsDatacenter:
+		return "🟥机房"
+	default:
+		return "N/A"
+	}
+}
+
+func parseTraceResponse(body string) map[string]string {
+	fields := make(map[string]string)
+	for _, line := range strings.Split(body, "\n") {
+		parts := strings.SplitN(strings.TrimSpace(line), "=", 2)
+		if len(parts) == 2 {
+			fields[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		}
+	}
+	return fields
+}
+
+func getIPType(ip string) string {
+	if ip == "" {
+		return "未知"
+	}
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return "无效IP"
+	}
+	if parsed.To4() != nil {
+		return "IPv4"
+	}
+	return "IPv6"
 }
 
 // 从文件中读取IP地址和端口

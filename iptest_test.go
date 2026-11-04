@@ -456,7 +456,7 @@ func batchFixture(t *testing.T, server *httptest.Server) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"main.sh", "iptest.go", "ip_init.js", "ip_tq.js", "package.json", "lib/csv.js", "lib/io.js", "lib/address.js"} {
+	for _, name := range []string{"main.sh", "iptest.go", "go.mod", "go.sum", "ip_init.js", "ip_tq.js", "package.json", "lib/csv.js", "lib/io.js", "lib/address.js"} {
 		data, err := os.ReadFile(filepath.Join(root, name))
 		if err != nil {
 			t.Fatal(err)
