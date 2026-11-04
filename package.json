@@ -1,6 +1,10 @@
 {
   "type": "module",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
   "dependencies": {
+    "csv-parse": "7.0.3",
     "jsdom": "^26.0.0",
     "node-fetch": "^3.3.2"
   }

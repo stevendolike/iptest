@@ -3,16 +3,20 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/csv"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -36,10 +40,10 @@ var (
 	speedTest    = flag.Int("speedtest", 5, "下载测速协程数量,设为0禁用测速")                                // 下载测速协程数量
 	speedTestURL = flag.String("url", "speed.cloudflare.com/__down?bytes=500000000", "测速文件地址") // 测速文件地址
 	enableTLS    = flag.Bool("tls", true, "是否启用TLS")                                           // TLS是否启用
-	delay        = flag.Int("delay", 0, "延迟阈值(ms)，默认为0禁用延迟过滤")                           // 默认0，禁用过滤
-	countries    = flag.String("countries", "", "国家过滤列表（逗号分隔，例如：CN,US,JP），默认空（不过滤）") // 国家过滤参数
-	speedLimit   = flag.Int("speedLimit", 0, "下载速度阈值(kB/s)，默认为0（不过滤）")                        // 速度阈值参数
-	fast         = flag.Bool("fast", false, "启用快速模式，测速时若前5秒速度未超过100kB/s则终止")                  // 快速模式参数
+	delay        = flag.Int("delay", 0, "延迟阈值(ms)，默认为0禁用延迟过滤")                                 // 默认0，禁用过滤
+	countries    = flag.String("countries", "", "国家过滤列表（逗号分隔，例如：CN,US,JP），默认空（不过滤）")           // 国家过滤参数
+	speedLimit   = flag.Int("speedLimit", 0, "下载速度阈值(kB/s)，默认为0（不过滤）")                         // 速度阈值参数
+	fast         = flag.Bool("fast", false, "启用快速模式，测速时若前5秒速度未超过100kB/s则终止")                   // 快速模式参数
 )
 
 type result struct {
@@ -89,6 +93,35 @@ func increaseMaxOpenFiles() {
 
 func main() {
 	flag.Parse()
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "错误: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	if *maxThreads <= 0 {
+		return fmt.Errorf("-max 必须大于 0")
+	}
+	if *speedTest < 0 {
+		return fmt.Errorf("-speedtest 不能小于 0")
+	}
+	if *delay < 0 || *speedLimit < 0 {
+		return fmt.Errorf("延迟和速度阈值不能小于 0")
+	}
+	if *File == "" || *outFile == "" {
+		return fmt.Errorf("输入及输出文件名不能为空")
+	}
+	if _, err := downloadURL(*speedTestURL, *enableTLS); err != nil {
+		return err
+	}
+	if *countries != "" {
+		for _, code := range strings.Split(*countries, ",") {
+			if !regexp.MustCompile(`^[A-Za-z]{2}$`).MatchString(strings.TrimSpace(code)) {
+				return fmt.Errorf("国家代码必须为两个英文字母")
+			}
+		}
+	}
 	var validCount int32 // 有效IP计数器
 
 	startTime := time.Now()
@@ -106,59 +139,9 @@ func main() {
 		}
 	}
 
-	var locations []location
-	if _, err := os.Stat("locations.json"); os.IsNotExist(err) {
-		fmt.Println("本地 locations.json 不存在\n正在从 https://proxy.api.030101.xyz/locations-adw.pages.dev/ 下载 locations.json")
-		resp, err := http.Get("https://proxy.api.030101.xyz/locations-adw.pages.dev/")
-		if err != nil {
-			fmt.Printf("无法从URL中获取JSON: %v\n", err)
-			return
-		}
-		defer resp.Body.Close()
-
-		body, err := ioutil.ReadAll(resp.Body)
-		if err != nil {
-			fmt.Printf("无法读取响应体: %v\n", err)
-			return
-		}
-
-		err = json.Unmarshal(body, &locations)
-		if err != nil {
-			fmt.Printf("无法解析JSON: %v\n", err)
-			return
-		}
-		file, err := os.Create("locations.json")
-		if err != nil {
-			fmt.Printf("无法创建文件: %v\n", err)
-			return
-		}
-		defer file.Close()
-
-		_, err = file.Write(body)
-		if err != nil {
-			fmt.Printf("无法写入文件: %v\n", err)
-			return
-		}
-	} else {
-		fmt.Println("本地 locations.json 已存在,无需重新下载")
-		file, err := os.Open("locations.json")
-		if err != nil {
-			fmt.Printf("无法打开文件: %v\n", err)
-			return
-		}
-		defer file.Close()
-
-		body, err := ioutil.ReadAll(file)
-		if err != nil {
-			fmt.Printf("无法读取文件: %v\n", err)
-			return
-		}
-
-		err = json.Unmarshal(body, &locations)
-		if err != nil {
-			fmt.Printf("无法解析JSON: %v\n", err)
-			return
-		}
+	locations, err := loadLocations("locations.json")
+	if err != nil {
+		return err
 	}
 
 	locationMap := make(map[string]location)
@@ -168,16 +151,20 @@ func main() {
 
 	ips, err := readIPs(*File)
 	if err != nil {
-		fmt.Printf("无法从文件中读取 IP: %v\n", err)
-		return
+		return fmt.Errorf("无法从文件中读取 IP: %w", err)
 	}
 
 	var wg sync.WaitGroup
 	wg.Add(len(ips))
 	resultChan := make(chan result, len(ips))
-	thread := make(chan struct{}, *maxThreads)
+	concurrency := *maxThreads
+	if concurrency > len(ips) {
+		concurrency = len(ips)
+	}
+	thread := make(chan struct{}, concurrency)
 
 	var count int
+	var resultMu sync.Mutex // Protect the shared results and progress counters.
 	total := len(ips)
 
 	for _, ip := range ips {
@@ -185,13 +172,15 @@ func main() {
 		go func(ip string) {
 			defer func() {
 				<-thread
-				wg.Done()
+				resultMu.Lock()
 				count++
 				percentage := float64(count) / float64(total) * 100
 				fmt.Printf("已完成: %d 总数: %d 已完成: %.2f%%\r", count, total, percentage)
 				if count == total {
 					fmt.Printf("已完成: %d 总数: %d 已完成: %.2f%%\n", count, total, percentage)
 				}
+				resultMu.Unlock()
+				wg.Done()
 			}()
 
 			parts := strings.Fields(ip)
@@ -285,6 +274,10 @@ func main() {
 					locCode := matches[2]
 					loc, ok := locationMap[dataCenter]
 					if !ok {
+						if len(countryFilter) > 0 {
+							return // Unknown country cannot satisfy an explicit allowlist.
+						}
+						atomic.AddInt32(&validCount, 1)
 						fmt.Printf("发现有效IP %s 端口 %d 位置信息未知 延迟 %d 毫秒\n", ipAddr, port, tcpDuration.Milliseconds())
 						resultChan <- result{ipAddr, port, dataCenter, locCode, "", "", "", "", "", "", fmt.Sprintf("%d ms", tcpDuration.Milliseconds()), tcpDuration}
 						return
@@ -314,7 +307,6 @@ func main() {
 	if len(resultChan) == 0 {
 		fmt.Print("\033[2J")
 		fmt.Println("没有发现有效的IP")
-		return
 	}
 
 	var results []speedtestresult
@@ -322,11 +314,18 @@ func main() {
 		fmt.Printf("找到符合条件的ip 共%d个\n", atomic.LoadInt32(&validCount))
 		fmt.Printf("开始测速\n")
 		var wg2 sync.WaitGroup
-		wg2.Add(*speedTest)
+		workers := *speedTest
+		if workers > *maxThreads {
+			workers = *maxThreads
+		}
+		if workers > len(resultChan) {
+			workers = len(resultChan)
+		}
+		wg2.Add(workers)
 		count = 0
 		total := len(resultChan)
 		results = []speedtestresult{}
-		for i := 0; i < *speedTest; i++ {
+		for i := 0; i < workers; i++ {
 			thread <- struct{}{}
 			go func() {
 				defer func() {
@@ -335,19 +334,22 @@ func main() {
 				}()
 				for res := range resultChan {
 					downloadSpeed := getDownloadSpeed(res.ip, res.port)
-					// 检查下载速度是否低于阈值
-					if *speedLimit > 0 && downloadSpeed < float64(*speedLimit) {
-						fmt.Printf("IP %s 端口 %d 下载速度 %.0f kB/s 低于速度阈值 %d kB/s，跳过\n", res.ip, res.port, downloadSpeed, *speedLimit)
-						continue
+					keep := downloadSpeed > 0 && (*speedLimit == 0 || downloadSpeed >= float64(*speedLimit))
+					if !keep {
+						fmt.Printf("IP %s 端口 %d 测速无效或低于速度阈值，跳过\n", res.ip, res.port)
 					}
-					results = append(results, speedtestresult{result: res, downloadSpeed: downloadSpeed})
+					resultMu.Lock()
+					if keep {
+						results = append(results, speedtestresult{result: res, downloadSpeed: downloadSpeed})
+					}
 
 					count++
 					percentage := float64(count) / float64(total) * 100
 					fmt.Printf("已完成: %.2f%%\r", percentage)
 					if count == total {
-						fmt.Printf("已完成: %.2f%%\033[0\n", percentage)
+						fmt.Printf("已完成: %.2f%%\n", percentage)
 					}
+					resultMu.Unlock()
 				}
 			}()
 		}
@@ -368,18 +370,17 @@ func main() {
 		})
 	}
 
-	file, err := os.Create(*outFile)
+	file, err := os.CreateTemp(filepath.Dir(*outFile), ".iptest-*.csv")
 	if err != nil {
-		fmt.Printf("无法创建文件: %v\n", err)
-		return
+		return fmt.Errorf("无法创建输出临时文件: %w", err)
 	}
 	defer file.Close()
+	defer os.Remove(file.Name())
 
 	// 添加 UTF-8 BOM 头
 	_, err = file.Write([]byte{0xEF, 0xBB, 0xBF})
 	if err != nil {
-		fmt.Printf("写入 UTF-8 BOM 失败: %v\n", err)
-		return
+		return fmt.Errorf("写入 UTF-8 BOM 失败: %w", err)
 	}
 
 	writer := csv.NewWriter(file)
@@ -398,11 +399,17 @@ func main() {
 
 	writer.Flush()
 	if err := writer.Error(); err != nil {
-		fmt.Printf("写入 CSV 失败: %v\n", err)
-		return
+		return fmt.Errorf("写入 CSV 失败: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		return fmt.Errorf("关闭输出文件失败: %w", err)
+	}
+	if err := os.Rename(file.Name(), *outFile); err != nil {
+		return fmt.Errorf("替换输出文件失败: %w", err)
 	}
 	fmt.Print("\033[2J")
 	fmt.Printf("有效IP数量: %d | 成功将结果写入文件 %s，耗时 %d秒\n", len(results), *outFile, time.Since(startTime)/time.Second)
+	return nil
 }
 
 // 从文件中读取IP地址和端口
@@ -425,8 +432,8 @@ func readIPs(File string) ([]string, error) {
 		portStr := parts[1]
 
 		port, err := strconv.Atoi(portStr)
-		if err != nil {
-			fmt.Printf("端口格式错误: %s\n", portStr)
+		if err != nil || port < 1 || port > 65535 || !regexp.MustCompile(`^[0-9]+$`).MatchString(portStr) || net.ParseIP(ipAddr) == nil {
+			fmt.Printf("IP 或端口格式错误: %s\n", line)
 			continue
 		}
 
@@ -448,14 +455,16 @@ func inc(ip net.IP) {
 
 // 测速函数
 func getDownloadSpeed(ip string, port int) float64 {
-	var protocol string
-	if *enableTLS {
-		protocol = "https://"
-	} else {
-		protocol = "http://"
+	address, err := downloadURL(*speedTestURL, *enableTLS)
+	if err != nil {
+		fmt.Println(err)
+		return 0
 	}
-	speedTestURL := protocol + *speedTestURL
-	req, _ := http.NewRequest("GET", speedTestURL, nil)
+	req, err := http.NewRequest("GET", address, nil)
+	if err != nil {
+		fmt.Printf("创建测速请求失败: %v\n", err)
+		return 0
+	}
 	req.Header.Set("User-Agent", "Mozilla/5.0")
 
 	dialer := &net.Dialer{
@@ -471,6 +480,9 @@ func getDownloadSpeed(ip string, port int) float64 {
 
 	fmt.Printf("正在测试IP %s 端口 %d\n", ip, port)
 	startTime := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
 
 	client := http.Client{
 		Transport: &http.Transport{
@@ -478,7 +490,7 @@ func getDownloadSpeed(ip string, port int) float64 {
 				return conn, nil
 			},
 		},
-		Timeout: 5 * time.Second,
+		Timeout: 10 * time.Second,
 	}
 	req.Close = true
 	resp, err := client.Do(req)
@@ -487,72 +499,66 @@ func getDownloadSpeed(ip string, port int) float64 {
 		return 0
 	}
 	defer resp.Body.Close()
-
-	var written int64
-	var speed float64
-	if *fast {
-		// 快速模式：前5秒速度检查
-		limitedReader := io.LimitReader(resp.Body, 1024*1024*100) // 限制最大读取100MB
-		countingReader := &countingReader{reader: limitedReader}
-		fastDone := make(chan bool)
-		var readErr error
-
-		go func() {
-			_, err := io.Copy(io.Discard, countingReader)
-			readErr = err
-			fastDone <- true
-		}()
-
-		select {
-		case <-fastDone:
-			if readErr != nil && readErr != io.EOF {
-				fmt.Printf("IP %s 端口 %d 快速模式测速失败: %v\n", ip, port, readErr)
-				return 0
-			}
-			duration := time.Since(startTime)
-			if duration.Seconds() > 0 {
-				speed = float64(countingReader.written) / duration.Seconds() / 1024
-			}
-			if duration.Seconds() < 5 && speed < 100 {
-				fmt.Printf("IP %s 端口 %d 前%.1f秒速度 %.0f kB/s 未达100 kB/s，终止测速\n", ip, port, duration.Seconds(), speed)
-				return speed
-			}
-			// 继续读取剩余数据
-			written, _ = io.Copy(io.Discard, resp.Body)
-			duration = time.Since(startTime)
-			if duration.Seconds() > 0 {
-				speed = float64(written+countingReader.written) / duration.Seconds() / 1024
-			}
-		case <-time.After(5 * time.Second):
-			duration := time.Since(startTime)
-			if duration.Seconds() > 0 {
-				speed = float64(countingReader.written) / duration.Seconds() / 1024
-			}
-			fmt.Printf("IP %s 端口 %d 前5秒速度 %.0f kB/s 未达100 kB/s，终止测速\n", ip, port, speed)
-			return speed
-		}
-	} else {
-		// 正常模式
-		written, _ = io.Copy(io.Discard, resp.Body)
-		duration := time.Since(startTime)
-		if duration.Seconds() > 0 {
-			speed = float64(written) / duration.Seconds() / 1024
-		}
+	if resp.StatusCode != http.StatusOK {
+		fmt.Printf("IP %s 端口 %d 测速 HTTP 状态无效: %d\n", ip, port, resp.StatusCode)
+		return 0
 	}
 
-	fmt.Printf("IP %s 端口 %d 下载速度 %.0f kB/s\n", ip, port, speed)
-	return speed
+	// Only one goroutine reads the body. Buffered completion cannot leak on an
+	// early low-speed return, and the byte counter is safe to sample concurrently.
+	reader := &countingReader{reader: resp.Body}
+	done := make(chan error, 1)
+	go func() {
+		_, err := io.Copy(io.Discard, reader)
+		done <- err
+	}()
+	measuredSpeed := func() float64 {
+		seconds := time.Since(startTime).Seconds()
+		if seconds <= 0 {
+			return 0
+		}
+		return float64(atomic.LoadInt64(&reader.written)) / seconds / 1024
+	}
+	var checkpoint <-chan time.Time
+	if *fast {
+		timer := time.NewTimer(5 * time.Second)
+		defer timer.Stop()
+		checkpoint = timer.C
+	}
+	for {
+		select {
+		case err := <-done:
+			if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+				fmt.Printf("IP %s 端口 %d 测速读取失败: %v\n", ip, port, err)
+				return 0
+			}
+			speed := measuredSpeed()
+			fmt.Printf("IP %s 端口 %d 下载速度 %.0f kB/s\n", ip, port, speed)
+			return speed
+		case <-checkpoint:
+			checkpoint = nil // The fast checkpoint runs once, not the total timeout.
+			speed := measuredSpeed()
+			if speed < 100 {
+				cancel()
+				fmt.Printf("IP %s 端口 %d 前5秒速度 %.0f kB/s 未达100 kB/s，终止测速\n", ip, port, speed)
+				return speed
+			}
+		case <-ctx.Done():
+			// The sampling window ending is not a failed download. Keep its bytes.
+			return measuredSpeed()
+		}
+	}
 }
 
 // countingReader 用于统计读取的字节数
 type countingReader struct {
+	written int64 // First field: 64-bit atomic alignment on 32-bit platforms.
 	reader  io.Reader
-	written int64
 }
 
 func (r *countingReader) Read(p []byte) (int, error) {
 	n, err := r.reader.Read(p)
-	r.written += int64(n)
+	atomic.AddInt64(&r.written, int64(n))
 	return n, err
 }
 
@@ -564,4 +570,66 @@ func contains(slice []string, item string) bool {
 		}
 	}
 	return false
+}
+
+func loadLocations(name string) ([]location, error) {
+	body, err := os.ReadFile(name)
+	downloaded := false
+	if os.IsNotExist(err) {
+		client := &http.Client{Timeout: 15 * time.Second}
+		resp, requestErr := client.Get("https://proxy.api.030101.xyz/locations-adw.pages.dev/")
+		if requestErr != nil {
+			return nil, fmt.Errorf("下载 locations.json 失败: %w", requestErr)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("下载 locations.json: HTTP %d", resp.StatusCode)
+		}
+		body, err = ioutil.ReadAll(io.LimitReader(resp.Body, 4<<20))
+		downloaded = true
+	}
+	if err != nil {
+		return nil, fmt.Errorf("读取 locations.json 失败: %w", err)
+	}
+	var locations []location
+	if err := json.Unmarshal(body, &locations); err != nil {
+		return nil, fmt.Errorf("解析 locations.json 失败: %w", err)
+	}
+	if downloaded {
+		file, err := os.CreateTemp(filepath.Dir(name), ".locations-*.json")
+		if err != nil {
+			return nil, err
+		}
+		defer file.Close()
+		defer os.Remove(file.Name())
+		if _, err := file.Write(body); err != nil {
+			return nil, err
+		}
+		if err := file.Close(); err != nil {
+			return nil, err
+		}
+		if err := os.Rename(file.Name(), name); err != nil {
+			return nil, err
+		}
+	}
+	return locations, nil
+}
+
+func downloadURL(raw string, tls bool) (string, error) {
+	protocol := "http"
+	if tls {
+		protocol = "https"
+	}
+	address := raw
+	if !strings.Contains(address, "://") {
+		address = protocol + "://" + address
+	}
+	parsed, err := url.Parse(address)
+	if err != nil {
+		return "", fmt.Errorf("测速 URL 无效: %w", err)
+	}
+	if parsed.Hostname() == "" || parsed.User != nil || parsed.Scheme != protocol {
+		return "", fmt.Errorf("测速 URL 必须包含主机名、不得包含凭据，且协议必须与 -tls 一致")
+	}
+	return parsed.String(), nil
 }

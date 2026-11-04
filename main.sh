@@ -1,52 +1,41 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
-# 定义日志函数
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+cd "$root"
+
 log() {
-    local level=$1
-    local message=$2
-    local timestamp
-    timestamp=$(date +'%Y-%m-%d %H:%M:%S')
-    echo "[$timestamp] [$level] $message"
+    printf '[%s] [%s] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "$1" "$2"
 }
 
-# 检查 locations.json 是否存在
-if [ ! -f "locations.json" ]; then
-   log "INFO" "locations.json 不存在，开始执行 data.js"
-   if node data.js; then
-       log "INFO" "data.js 执行成功"
-   else
-       log "ERROR" "data.js 执行失败"
-       exit 1
-   fi
-else
-   log "INFO" "locations.json 已存在，跳过 data.js"
-fi
+run_step() {
+    local name=$1
+    shift
+    log INFO "开始执行 $name"
+    if "$@"; then
+        log INFO "$name 执行成功"
+    else
+        local code=$?
+        log ERROR "$name 执行失败"
+        return "$code"
+    fi
+}
 
-# 执行 ip_init.js
-log "INFO" "开始执行 ip_init.js"
-if node ip_init.js; then
-    log "INFO" "ip_init.js 执行成功"
-else
-    log "ERROR" "ip_init.js 执行失败"
-    exit 1
-fi
+# Reserve the pipeline's filenames: otherwise a custom output could leave an
+# old ip_tq.csv behind for the final stage to consume.
+for arg in "$@"; do
+    case "$arg" in
+        -file*|--file*|-outfile*|--outfile*)
+            log ERROR "批量管线不允许覆盖 -file / -outfile"
+            exit 1
+            ;;
+    esac
+done
 
-# 执行 iptest.go
-log "INFO" "开始执行 iptest.go"
-if go run iptest.go -file ip.txt -outfile ip_tq.csv -max 20 -speedtest 5; then
-    log "INFO" "iptest.go 执行成功"
-else
-    log "ERROR" "iptest.go 执行失败"
-    exit 1
+if [ ! -f locations.json ]; then
+    run_step data.js node data.js
 fi
-
-# 执行 ip_tq.js
-log "INFO" "开始执行 ip_tq.js"
-if node ip_tq.js; then
-    log "INFO" "ip_tq.js 执行成功"
-else
-    log "ERROR" "ip_tq.js 执行失败"
-    exit 1
-fi
-
-log "INFO" "所有脚本执行完毕"
+run_step ip_init.js node ip_init.js
+run_step iptest.go go run iptest.go -file ip.txt -outfile ip_tq.csv -max 20 -speedtest 5 "$@"
+run_step ip_tq.js node ip_tq.js ip_tq.csv
+log INFO "所有脚本执行完毕"

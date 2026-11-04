@@ -1,0 +1,15 @@
+/node_modules/
+/iptest
+/iptest.exe
+/release_assets/
+/init.csv
+/config.json
+/locations.json
+/data.json
+/city.json
+/ip.txt
+/ip.csv
+/ip_tq.csv
+/ip_tq.txt
+/proxy_ips.txt
+/reverse_ips.txt
