@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runCLI } from './helpers.mjs';
+import { runCLI, csvHeader, localLocations } from './helpers.mjs';
 
 test('invalid decimal and out-of-range ports are never emitted', t => {
   const r = runCLI(t, 'ip_init.js', { 'init.csv': 'ip,port\n192.0.2.1,443\n192.0.2.2,443.5\n192.0.2.3,65536\n192.0.2.4,-1\n192.0.2.5,0x1bb\n' });
@@ -31,4 +31,47 @@ test('config refuses missing fields instead of undefined output', t => {
   const r = runCLI(t, 'config.js', { 'config.json': '{"ip":"192.0.2.1"}\n', 'ip.txt': 'LOCAL_PREVIOUS_RUN\n' });
   assert.notEqual(r.status, 0, r.stderr);
   assert.equal(r.read('ip.txt'), 'LOCAL_PREVIOUS_RUN\n');
+});
+
+function resultRow(ip, port, speed = '100 kB/s') {
+  return [ip, port, 'true', 'TST', 'US', 'Fixture', 'City', '地区', '国家', '城市', 'TEST', '1 ms', speed].join(',');
+}
+
+test('result converter rejects invalid endpoints without replacing previous text', async t => {
+  for (const [ip, port] of [['not-an-ip', '443'], ['999.0.0.1', '443'], ['::1%fixture', '443'], ['192.0.2.1', '70000'], ['192.0.2.1', '-1'], ['192.0.2.1', '443.5'], ['192.0.2.1', '0x1bb']]) {
+    await t.test(`${ip}:${port}`, t => {
+      const previous = 'LOCAL_PREVIOUS_RESULT\n';
+      const r = runCLI(t, 'ip_tq.js', {
+        'result.csv': `${csvHeader}\n${resultRow('192.0.2.2', '443')}\n${resultRow(ip, port)}\n`,
+        'locations.json': localLocations,
+        'result.txt': previous,
+      }, {}, ['result.csv']);
+      assert.equal(r.error, undefined);
+      assert.notEqual(r.status, 0);
+      assert.match(r.stderr, /IP 或端口/);
+      assert.equal(r.read('result.txt'), previous);
+    });
+  }
+});
+
+test('result converter validates endpoints even in speed-filtered rows', t => {
+  const previous = 'LOCAL_PREVIOUS_RESULT\n';
+  const r = runCLI(t, 'ip_tq.js', {
+    'result.csv': `${csvHeader}\n${resultRow('not-an-ip', '70000', '0 kB/s')}\n`,
+    'locations.json': localLocations,
+    'result.txt': previous,
+  }, {}, ['result.csv']);
+  assert.equal(r.error, undefined);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /IP 或端口/);
+  assert.equal(r.read('result.txt'), previous);
+});
+
+test('result converter emits canonical IPv6 endpoints from valid rows', t => {
+  const r = runCLI(t, 'ip_tq.js', {
+    'result.csv': `${csvHeader}\n${resultRow('::1', '08443')}\n`,
+    'locations.json': localLocations,
+  }, {}, ['result.csv']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.read('result.txt'), '[::1]:8443#TESTFixture Country1');
 });

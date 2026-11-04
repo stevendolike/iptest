@@ -23,14 +23,36 @@ run_step() {
 
 # Reserve the pipeline's filenames: otherwise a custom output could leave an
 # old ip_tq.csv behind for the final stage to consume.
+value_flag=''
 for arg in "$@"; do
+    if [ -n "$value_flag" ]; then
+        value_flag=''
+        continue
+    fi
     case "$arg" in
         -file*|--file*|-outfile*|--outfile*)
             log ERROR "批量管线不允许覆盖 -file / -outfile"
             exit 1
             ;;
+        -max|--max|-speedtest|--speedtest|-url|--url|-delay|--delay|-countries|--countries|-speedLimit|--speedLimit)
+            value_flag=$arg
+            ;;
+        -max=*|--max=*|-speedtest=*|--speedtest=*|-url=*|--url=*|-delay=*|--delay=*|-countries=*|--countries=*|-speedLimit=*|--speedLimit=*|-tls|--tls|-tls=*|--tls=*|-fast|--fast|-fast=*|--fast=*)
+            ;;
+        -*)
+            log ERROR "不支持的测试参数或位置参数标记: $arg"
+            exit 1
+            ;;
+        *)
+            log ERROR "不支持位置参数: $arg"
+            exit 1
+            ;;
     esac
 done
+if [ -n "$value_flag" ]; then
+    log ERROR "测试参数缺少值: $value_flag"
+    exit 1
+fi
 
 if [ ! -f locations.json ]; then
     run_step data.js node data.js

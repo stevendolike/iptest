@@ -171,6 +171,30 @@ func TestReviewBaselineValidTraceAndBOM(t *testing.T) {
 	}
 }
 
+func TestTraceHTTPStatusControlsExportedEndpoints(t *testing.T) {
+	for _, status := range []int{http.StatusOK, http.StatusCreated, http.StatusFound, http.StatusForbidden, http.StatusInternalServerError} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(status)
+				fmt.Fprint(w, "uag=Mozilla/5.0\ncolo=TST\nloc=US\n")
+			}))
+			defer s.Close()
+			dir := fixtureDir(t, s, 1)
+			out, err, timedOut := runFixture(t, os.Getenv("IPTEST_BIN"), dir, 5*time.Second)
+			if err != nil || timedOut {
+				t.Fatalf("local trace fixture failed: %v; %s", err, out)
+			}
+			want := 0
+			if status >= 200 && status < 300 {
+				want = 1
+			}
+			if rows := fixtureRows(t, dir); len(rows) != want {
+				t.Fatalf("HTTP %d trace exported %d endpoints, want %d; %s", status, len(rows), want, out)
+			}
+		})
+	}
+}
+
 func TestReviewKnownCountryFilterControl(t *testing.T) {
 	s := fixtureServer(t, "TST", true)
 	dir := fixtureDir(t, s, 1)
@@ -459,17 +483,103 @@ func batchFixture(t *testing.T, server *httptest.Server) string {
 	return dir
 }
 
-func runBatch(t *testing.T, dir string) (string, error) {
+func runBatch(t *testing.T, dir string, args ...string) (string, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "bash", "main.sh", "-tls=false", "-speedtest=0")
+	command := append([]string{"main.sh", "-tls=false", "-speedtest=0"}, args...)
+	cmd := exec.CommandContext(ctx, "bash", command...)
 	cmd.Dir = dir
 	out, err := cmd.CombinedOutput()
 	if ctx.Err() != nil {
 		t.Fatalf("batch fixture timed out: %s", out)
 	}
 	return string(out), err
+}
+
+func TestLinuxFileLimitPolicyDoesNotSpawnChildShell(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux file descriptor policy")
+	}
+	server := fixtureServer(t, "TST", true)
+	dir := fixtureDir(t, server, 1)
+	bin := filepath.Join(dir, "fake-bin")
+	if err := os.Mkdir(bin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	marker := filepath.Join(dir, "child-shell.marker")
+	if err := os.WriteFile(filepath.Join(bin, "bash"), []byte("#!/bin/sh\nprintf '%s\\n' child-shell > \"$IPTEST_FD_MARKER\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("IPTEST_FD_MARKER", marker)
+	out, err, timedOut := runFixture(t, os.Getenv("IPTEST_BIN"), dir, 5*time.Second)
+	if err != nil || timedOut || len(fixtureRows(t, dir)) != 1 {
+		t.Fatalf("valid fixture must still produce its endpoint: %v; %s", err, out)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("CLI invoked a child bash rather than inheriting the parent file limit: %v; %s", err, out)
+	}
+	if strings.Contains(out, "上限已提升") || !strings.Contains(out, "父进程") || !strings.Contains(out, "ulimit -n") {
+		t.Fatalf("file-limit policy must be honest and actionable: %s", out)
+	}
+}
+
+func TestCLIRejectsPositionalArgumentsBeforeChangingOutput(t *testing.T) {
+	for _, args := range [][]string{{"unexpected"}, {"unexpected", "-countries=CN"}, {"-countries=CN", "unexpected"}, {"--", "unexpected"}} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			server := fixtureServer(t, "TST", true)
+			dir := fixtureDir(t, server, 1)
+			previous := []byte("LOCAL_PREVIOUS_CSV\n")
+			if err := os.WriteFile(filepath.Join(dir, "out.csv"), previous, 0600); err != nil {
+				t.Fatal(err)
+			}
+			out, err, timedOut := runFixture(t, os.Getenv("IPTEST_BIN"), dir, 5*time.Second, args...)
+			if timedOut || err == nil || !strings.Contains(out, "位置参数") {
+				t.Fatalf("positional arguments must fail closed: %v; %s", err, out)
+			}
+			got, readErr := os.ReadFile(filepath.Join(dir, "out.csv"))
+			if readErr != nil || !bytes.Equal(got, previous) {
+				t.Fatalf("argument failure replaced prior output: %v; %q", readErr, got)
+			}
+		})
+	}
+}
+
+func TestBatchRejectsPositionalArgumentsBeforeStartingPipeline(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Bash batch integration is verified on Linux")
+	}
+	server := fixtureServer(t, "TST", true)
+	dir := batchFixture(t, server)
+	previous := []byte("LOCAL_PREVIOUS_TXT\n")
+	if err := os.WriteFile(filepath.Join(dir, "ip_tq.txt"), previous, 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := runBatch(t, dir, "unexpected", "-countries=CN")
+	if err == nil || !strings.Contains(out, "位置参数") || strings.Contains(out, "开始执行") {
+		t.Fatalf("batch accepted positional token or started work: %v; %s", err, out)
+	}
+	got, readErr := os.ReadFile(filepath.Join(dir, "ip_tq.txt"))
+	if readErr != nil || !bytes.Equal(got, previous) {
+		t.Fatalf("failed batch replaced prior text: %v; %q", readErr, got)
+	}
+}
+
+func TestBatchSpaceSeparatedCountryFlagStillWorks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Bash batch integration is verified on Linux")
+	}
+	server := fixtureServer(t, "TST", true)
+	dir := batchFixture(t, server)
+	out, err := runBatch(t, dir, "-countries", "CN")
+	if err != nil {
+		t.Fatalf("valid separated flag rejected: %v; %s", err, out)
+	}
+	data, readErr := os.ReadFile(filepath.Join(dir, "ip_tq.txt"))
+	if readErr != nil || len(data) != 0 {
+		t.Fatalf("country filter did not produce a fresh empty result: %v; %q", readErr, data)
+	}
 }
 
 func TestBatchPipelineUsesPassedTLSAndProducesFreshText(t *testing.T) {

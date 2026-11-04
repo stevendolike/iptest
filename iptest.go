@@ -15,7 +15,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -79,18 +78,6 @@ type location struct {
 	Emoji     string  `json:"emoji"`
 }
 
-// 尝试提升文件描述符的上限
-func increaseMaxOpenFiles() {
-	fmt.Println("正在尝试提升文件描述符的上限...")
-	cmd := exec.Command("bash", "-c", "ulimit -n 10000")
-	_, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Printf("提升文件描述符上限时出现错误: %v\n", err)
-	} else {
-		fmt.Printf("文件描述符上限已提升!\n")
-	}
-}
-
 func main() {
 	flag.Parse()
 	if err := run(); err != nil {
@@ -100,6 +87,9 @@ func main() {
 }
 
 func run() error {
+	if flag.NArg() != 0 {
+		return fmt.Errorf("不支持位置参数: %s；请使用命名参数", strings.Join(flag.Args(), " "))
+	}
 	if *maxThreads <= 0 {
 		return fmt.Errorf("-max 必须大于 0")
 	}
@@ -125,9 +115,8 @@ func run() error {
 	var validCount int32 // 有效IP计数器
 
 	startTime := time.Now()
-	osType := runtime.GOOS
-	if osType == "linux" {
-		increaseMaxOpenFiles()
+	if runtime.GOOS == "linux" {
+		fmt.Println("Linux 文件描述符上限沿用父进程设置；高并发前请在启动 shell 设置 ulimit -n 10000（受硬上限限制）。")
 	}
 
 	// 解析国家过滤列表
@@ -238,13 +227,16 @@ func run() error {
 			if err != nil {
 				return
 			}
+			defer resp.Body.Close()
+			if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+				return // Error/interception bodies must not qualify as valid trace data.
+			}
 
 			duration := time.Since(start)
 			if duration > maxDuration {
 				return
 			}
 
-			defer resp.Body.Close()
 			buf := &bytes.Buffer{}
 			timeout := time.After(maxDuration)
 			done := make(chan bool)

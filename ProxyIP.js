@@ -5,7 +5,7 @@ import url from "node:url";
 import fetch from "node-fetch";
 import { readCSV } from './lib/csv.js';
 import { writeTextAtomic } from './lib/io.js';
-import { parseIPPort } from './lib/address.js';
+import { parseIPPort, formatIPPort } from './lib/address.js';
 
 // 获取当前脚本路径
 const __filename = url.fileURLToPath(import.meta.url);
@@ -69,6 +69,7 @@ async function extractIpAndPort() {
 // 验证代理
 async function validateProxy(entry) {
   const [ip, port] = entry.split(" ");
+  const endpoint = formatIPPort(ip, port);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10000);
   try {
@@ -92,16 +93,16 @@ async function validateProxy(entry) {
     const resultData = await response.json();
 
     if (resultData && resultData.proxyip) {
-      console.log(`发现有效 ProxyIP: ${ip}:${port}`);
-      return { type: "proxyip", entry: `${ip}:${port}` };
+      console.log(`发现有效 ProxyIP: ${endpoint}`);
+      return { type: "proxyip", entry: endpoint };
     }
 
     if (resultData && resultData.reverse) {
-      console.log(`发现有效 反代IP: ${ip}:${port}`);
-      return { type: "reverse", entry: `${ip}:${port}` };
+      console.log(`发现有效 反代IP: ${endpoint}`);
+      return { type: "reverse", entry: endpoint };
     }
   } catch (error) {
-    throw new Error(`请求失败: ${ip}:${port} -> ${error.message}`);
+    throw new Error(`请求失败: ${endpoint} -> ${error.message}`);
   } finally {
     clearTimeout(timer);
   }

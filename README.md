@@ -8,7 +8,7 @@
 
 - 同步并发结果及进度，避免漏写 IP。
 - 下载最多采样 10 秒；快速模式在第 5 秒检查速度，低于 100 kB/s 时提前停止并保留已测速度。需要剔除低速结果时同时设置 `-speedLimit`。
-- HTTP 错误响应不参与测速；有国家 allowlist 时不接受未知国家。
+- HTTP 错误响应不参与有效 IP 探测或测速；有国家 allowlist 时不接受未知国家。
 - 参数、IP、端口及输入格式会验证；真实读写错误返回非零退出码。
 - 成功的零结果运行输出当次空 CSV（保留表头）／空 TXT；写入失败保留上一份完整文件，批量管线立即停止。
 - CSV 支持引号、逗号、多行字段与 UTF-8 BOM；JSON 转换支持数组、单个对象及 JSON Lines。
@@ -117,7 +117,7 @@ CSV 文件使用 UTF-8-BOM 编码，包含以下字段：
 
 1. **文件权限**：首次运行会自动下载 `locations.json`，请确保有写入权限。
 2. **网络连接**：需能访问 `https://proxy.api.030101.xyz/locations-adw.pages.dev/` 以下载地理位置数据。
-3. **Linux 系统**：可能需要 `sudo` 权限提升文件描述符上限。
+3. **Linux 系统**：程序沿用父进程的文件描述符上限，不会在子 shell 中假装提升。高并发运行前请在同一个启动 shell 执行 `ulimit -n 10000`（受当前硬上限限制）；用 systemd 等服务启动时设置该服务的 `LimitNOFILE`。不需要为了测速默认使用 `sudo`。
 4. **测速文件**：默认请求 Cloudflare 的 500MB 文件，下载采样最多 10 秒；高速连接可能在此之前完成文件下载，请留意流量。
 5. **国家过滤**：输入的国家代码需与 `locations.json` 中的 `cca2` 字段一致（如 `CN`、`US`）。Windows 用户建议使用引号，如 `-countries="CN,US"`。
 6. **速度过滤**：仅在启用测速（`-speedtest > 0`）时生效，低于 `-speedLimit` 的 IP 不会记录到输出文件中。
@@ -169,7 +169,7 @@ ip,port
 bash main.sh -countries="CN,US" -speedLimit=1000 -fast
 ```
 
-管线允许追加 Go 测试参数，但保留 `-file`、`-outfile`，避免后续步骤误用旧文件。单独运行 Go 时可自由指定输入／输出。
+管线允许追加表中列出的 Go 测试参数，但保留 `-file`、`-outfile`，避免后续步骤误用旧文件。`-countries CN,US` 和 `-countries=CN,US` 均支持；布尔值使用 `-tls=false` 这类等号格式。位置参数、未知参数和缺少值会在管线开始前拒绝；单独运行 Go 也不接受位置参数，但可自由指定输入／输出。
 
 ## 运行
 
@@ -216,7 +216,7 @@ node ip_tq.js ip_tq.csv
 ]
 ```
 
-`ip_tq.js` 可明确指定一个或多个 Go 结果 CSV；未指定时扫描当前脚本目录的 CSV，但跳过原始 `init.csv`。缺列／无效 CSV 返回失败码，不会覆盖上一次完整 TXT。
+`ip_tq.js` 可明确指定一个或多个 Go 结果 CSV；未指定时扫描当前脚本目录的 CSV，但跳过原始 `init.csv`。缺列、无效 CSV 或任一数据记录的 IP／端口无效都会使该文件转换失败，不会覆盖上一次完整 TXT；低速过滤不绕过地址验证。有效 IPv6 输出为 `[IPv6]:端口`，端口规范化为十进制整数。
 
 ## 自动验证及发布
 
@@ -227,7 +227,7 @@ bash tools/check.sh
 
 测试需要 Go、Node.js、Bash 和支持 Go race detector 的 C 编译器（Linux 可用 GCC）。测试仅使用本地 HTTP 服务／明确 mock，不会扫描公网 IP。
 
-`Verify` workflow 在 PR、`main` 和 `fix/**` 分支执行。Release workflow 先解析并验证 tag，再测试和构建：既有 tag 使用其实际 commit；新 tag 显式绑定本次选择的 commit。所有平台构建及 release 的 `target_commitish` 使用同一解析结果，不会移动既有 tag。
+`Verify` workflow 在 PR、`main` 和 `fix/**` 分支执行。Release workflow 先解析并验证 tag，再测试和构建。手动运行时必须填写尚未使用的新 tag；既有 tag 会在解析阶段明确拒绝，不尝试用新测试工具重建历史版本。推送 tag 时必须与本次事件的 commit 一致。所有平台构建和发布使用同一 commit；同名 tag 的 workflow 串行执行。发布前以不强制覆盖的 Git push 原子保留新 tag，并重新读取远端确认 commit，冲突或读写失败立即停止；不会移动既有 tag，也不覆盖同名 release 资产。
 
 ## js格式化
 
