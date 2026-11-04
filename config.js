@@ -1,34 +1,34 @@
-// 该脚本用于读取 config.json 文件，提取其中的 ip 和 port 信息，并将其保存到 ip.txt 文件中
-import fs from "fs";
+// Convert JSON arrays, one JSON object, or JSON Lines into Go dial input.
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { parseIPPort } from './lib/address.js';
+import { writeTextAtomic } from './lib/io.js';
 
-// 读取 config.json 文件
-fs.readFile("config.json", "utf8", (err, data) => {
-  if (err) {
-    console.error("读取文件失败:", err);
-    return;
+const dir = path.dirname(fileURLToPath(import.meta.url));
+try {
+  const text = (await fs.readFile(path.join(dir, 'config.json'), 'utf8')).trim();
+  let rows;
+  if (!text) {
+    rows = [];
+  } else {
+    try {
+      const value = JSON.parse(text);
+      rows = Array.isArray(value) ? value : [value];
+    } catch {
+      rows = text.split(String.fromCharCode(10)).filter(line => line.trim()).map(line => JSON.parse(line));
+    }
   }
-
-  try {
-    // 解析 JSON 数据并提取 ip 和 port
-    const uniqueEntries = new Set(
-      data
-        .split("\n")
-        .filter((line) => line.trim() !== "") // 过滤空行
-        .map(JSON.parse) // 解析 JSON
-        .map(({ ip, port }) => `${ip} ${port}`), // 格式化为 "ip port"
-    );
-    // 将数据转换为文本格式
-    const textData = Array.from(uniqueEntries).join("\n");
-
-    // 将提取后的数据保存到新文件
-    fs.writeFile("ip.txt", textData, (err) => {
-      if (err) {
-        console.error("写入文件失败:", err);
-        return;
-      }
-      console.log("文件已成功保存为 ip.txt");
-    });
-  } catch (parseErr) {
-    console.error("解析 JSON 失败:", parseErr);
+  const entries = new Set();
+  for (const row of rows) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) throw new Error('每条 JSON 记录必须为对象');
+    const address = parseIPPort(row.ip, row.port);
+    if (!address) throw new Error('JSON 记录缺少合法的 ip / port');
+    entries.add(`${address.ip} ${address.port}`);
   }
-});
+  await writeTextAtomic(path.join(dir, 'ip.txt'), [...entries].join('\n'));
+  console.log('已成功提取到 ip.txt');
+} catch (error) {
+  console.error('处理 JSON 时发生错误:', error.message);
+  process.exitCode = 1;
+}

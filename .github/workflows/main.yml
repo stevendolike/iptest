@@ -3,17 +3,59 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Release tag (格式 v1.0.0)"
+        description: "New, unused release tag (格式 v1.0.0)"
         required: true
-        default: "v1.0.0"
   push:
     tags:
       - "v*"
 permissions:
-  contents: write
+  contents: read
   actions: read
+concurrency:
+  group: iptest-release-${{ github.event.inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
 jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      commit: ${{ steps.release.outputs.commit }}
+      build_time: ${{ steps.clock.outputs.value }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve the exact release commit
+        id: release
+        env:
+          REQUESTED_TAG: ${{ github.event.inputs.release_tag || github.ref_name }}
+        run: bash tools/resolve-release.sh "$REQUESTED_TAG" "$GITHUB_SHA" "$GITHUB_EVENT_NAME" >> "$GITHUB_OUTPUT"
+      - name: Record build time
+        id: clock
+        run: printf 'value=%s\n' "$(date -u +'%Y-%m-%d %H:%M:%S UTC')" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: resolve
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: '1.20.14'
+          cache: false
+      - uses: actions/setup-node@v7.1.0
+        with:
+          node-version: '24'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: bash tools/check.sh
+
   build:
+    needs: [resolve, verify]
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -93,85 +135,97 @@ jobs:
           - goos: windows
             goarch: arm64
             ext: ".exe"
-    outputs: # 添加作业输出
-      build_time: ${{ steps.set-build-time.outputs.BUILD_TIME }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7.0.1
         with:
-          fetch-depth: 0 # 获取完整提交历史
+          ref: ${{ needs.resolve.outputs.commit }}
+          persist-credentials: false
 
       - name: Setup Go
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v7.0.0
         with:
-          go-version: "1.20" # 根据你的需求设置Go版本
+          go-version: '1.20.14'
           cache: false
 
       - name: Create Release Assets Directory
         run: mkdir -p "${{ github.workspace }}/release_assets"
 
-      - name: Set Build Time
-        id: set-build-time # 给步骤设置ID
-        run: |
-          build_time=$(date -u +'%Y-%m-%d %H:%M:%S UTC')
-          echo "BUILD_TIME=$build_time" >> $GITHUB_OUTPUT
 
       - name: Build
         run: |
           echo "Building iptest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }} from iptest.go..."
-          go build -o ${{ github.workspace }}/release_assets/iptest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }} iptest.go
+          go build -o "${{ github.workspace }}/release_assets/iptest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}" iptest.go
         env:
          GOARCH: ${{ matrix.goarch }}
          GOOS: ${{ matrix.goos }} 
+         CGO_ENABLED: '0'
 
       - name: Generate SHA256
         run: |
           cd "${{ github.workspace }}/release_assets"
-          for file in $(find . -type f ! -name '*.sha256'); do
-            sha256sum "$file" | awk '{print $1}' > "${file}.sha256"
+          for file in ./*; do
+            [ -f "$file" ] || continue
+            sum=$(sha256sum -- "$file")
+            printf '%s\n' "${sum%% *}" > "${file}.sha256"
           done
           echo "SHA256 files generated:"
-          ls -1 *.sha256
+          ls -1 -- ./*.sha256
 
       - name: Upload Artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: iptest-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext || '' }}
           path: ${{ github.workspace }}/release_assets/*
+          if-no-files-found: error
 
   release:
     name: Release
-    needs: build
+    needs: [resolve, build]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
     steps:
-      - name: Checkout code
-        uses: actions/download-artifact@v4
+      - name: Checkout verified release source
+        uses: actions/checkout@v7.0.1
         with:
-          path: artifacts
+          ref: ${{ needs.resolve.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: true
 
-      - name: Move Release Assets
-        run: |
-          mkdir -p release_assets
-          find artifacts -type f ! -name "*.txt" -exec mv {} release_assets/ \;
-          echo "Files to release:"
-          ls -lh release_assets/
+      - name: Download release assets
+        uses: actions/download-artifact@v8.0.2
+        with:
+          path: release_assets
+          pattern: iptest-*
+          merge-multiple: true
+
+      - name: Atomically bind and verify the remote release tag
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.resolve.outputs.commit }}
+        run: bash tools/resolve-release.sh "$RELEASE_TAG" "$RELEASE_COMMIT" publish
 
       - name: Create Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3.0.3
         with:
-          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
-          name: "Release ${{ github.event.inputs.release_tag || github.ref_name }}"
+          tag_name: ${{ needs.resolve.outputs.tag }}
+          target_commitish: ${{ needs.resolve.outputs.commit }}
+          name: "Release ${{ needs.resolve.outputs.tag }}"
           body: |
             ## 多平台构建版本
-            **构建时间:** ${{ needs.build.outputs.build_time }}
+            **构建时间:** ${{ needs.resolve.outputs.build_time }}
+            **构建提交:** ${{ needs.resolve.outputs.commit }}
 
             完整变更日志:  
-            https://github.com/Kwisma/iptest/commits/${{ github.event.inputs.release_tag || github.ref_name }}
+            https://github.com/${{ github.repository }}/commits/${{ needs.resolve.outputs.tag }}
           files: |
             ${{ github.workspace }}/release_assets/*
           draft: false
-          prerelease: ${{ contains(github.event.inputs.release_tag, '-rc') || contains(github.ref_name, '-rc') }}
+          prerelease: ${{ contains(needs.resolve.outputs.tag, '-') }}
           generate_release_notes: true
           fail_on_unmatched_files: true
+          overwrite_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
